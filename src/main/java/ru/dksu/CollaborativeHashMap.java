@@ -1,22 +1,76 @@
 package ru.dksu;
 
 import java.util.*;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.*;
 
 public class CollaborativeHashMap<K, V>{
-    private final ExecutorService threadPool;
-    LinkedList<Node<K, V>>[] buckets;
+    private Buckets<K, V> buckets = new Buckets<>();
+    private int size = 0;
 
     public CollaborativeHashMap() {
         int bucketsSize = 16;
-        buckets = new LinkedList[bucketsSize];
+        buckets.buckets = new ConcurrentLinkedDeque[bucketsSize];
         for (int i = 0; i < bucketsSize; i++) {
-            buckets[i] = new LinkedList<>();
+            buckets.buckets[i] = new ConcurrentLinkedDeque<>();
         }
-        threadPool = Executors.newFixedThreadPool(8);
+        System.out.println("Processors: " + Runtime.getRuntime().availableProcessors());
+    }
+
+    static class BucketsRebuild<K, V> extends RecursiveTask<Void> {
+        private final ConcurrentLinkedDeque<CollaborativeHashMap.Node<K, V>>[] buckets;
+        private final ConcurrentLinkedDeque<CollaborativeHashMap.Node<K, V>>[] newBuckets;
+        private final int from, to;
+        BucketsRebuild(ConcurrentLinkedDeque<CollaborativeHashMap.Node<K, V>>[] buckets,
+                       ConcurrentLinkedDeque<CollaborativeHashMap.Node<K, V>>[] newBuckets,
+                       int from,
+                       int to) {
+            this.buckets = buckets;
+            this.newBuckets = newBuckets;
+            this.from = from;
+            this.to = to;
+        }
+
+        @Override
+        protected Void compute() {
+            if (to - from > 1) {
+                int med = (from + to) / 2;
+                var left = new BucketsRebuild(buckets, newBuckets, from, med);
+                var right = new BucketsRebuild(buckets,  newBuckets, med, to);
+                left.fork();
+                right.fork();
+                left.join();
+                right.join();
+                return null;
+            }
+            for (int i = from; i < to; i++) {
+                for (var el: buckets[i]) {
+                    newBuckets[Math.abs(el.key.hashCode()) % newBuckets.length].add(el);
+                }
+            }
+            return null;
+        }
+    }
+
+    static class Buckets<K, V> {
+        public ConcurrentLinkedDeque<CollaborativeHashMap.Node<K, V>>[] buckets;
+
+        // FORK JOIN POOL ========================================================
+        private final ForkJoinPool forkJoinPool = new ForkJoinPool(5);
+
+        public void rebuild(int newBucketsNumber) {
+            System.gc();
+            long nanoStart = System.nanoTime();
+            ConcurrentLinkedDeque<CollaborativeHashMap.Node<K, V>>[] newBuckets = new ConcurrentLinkedDeque[newBucketsNumber];
+            for (int i = 0; i < newBucketsNumber; i++) {
+                newBuckets[i] = new ConcurrentLinkedDeque<>();
+            }
+            var rebuild = new BucketsRebuild(buckets, newBuckets, 0, buckets.length);
+            System.out.println("Time rebuild created:   " + (System.nanoTime() - nanoStart));
+            nanoStart = System.nanoTime();
+            forkJoinPool.invoke(rebuild);
+            buckets = newBuckets;
+            System.out.println("Time rebuild:           " + (System.nanoTime() - nanoStart));
+        }
     }
 
     static class Node<K,V> implements Map.Entry<K,V> {
@@ -57,46 +111,21 @@ public class CollaborativeHashMap<K, V>{
     }
 
     private void rebuildIfNeed() {
-        if (size() > 4 * buckets.length) {
-            rebuild(buckets.length * 2);
-        } else if (size() < buckets.length) {
-            rebuild(buckets.length / 2);
+        if (size > 0.75 * buckets.buckets.length) {
+            buckets.rebuild(buckets.buckets.length * 2);
+            System.out.println("Current size: " + size());
+        } else if (false) {//size < buckets.buckets.length) {
+            buckets.rebuild(buckets.buckets.length / 2);
+            System.out.println("Current size: " + size());
         }
-    }
-
-    private void rebuild(int newBucketsNumber) {
-        long nanoStart = System.nanoTime();
-        LinkedList<Node<K, V>>[] newBuckets = new LinkedList[newBucketsNumber];
-        for (int i = 0; i < newBucketsNumber; i++) {
-            newBuckets[i] = new LinkedList<>();
-        }
-        var tasks = Arrays.stream(buckets).map((bucket) -> {
-            return (Runnable) () -> {
-                for (Node<K, V> el: bucket) {
-                    newBuckets[el.key.hashCode() % newBuckets.length].add(el);
-                }
-            };
-        });
-        var features = tasks.map((task) -> threadPool.submit(task));
-        features.forEach((feature) -> {
-            try {
-                feature.get();
-            } catch (Exception e) {}
-        });
-        buckets = newBuckets;
-        System.out.println("Time rebuild: " + (System.nanoTime() - nanoStart));
     }
 
     public int size() {
-        int sz = 0;
-        for (var node: buckets) {
-            sz += node.size();
-        }
-        return sz;
+        return size;
     }
 
-    private LinkedList<Node<K, V>> getBucket(Object key) {
-        return buckets[key.hashCode() % buckets.length];
+    private ConcurrentLinkedDeque<Node<K, V>> getBucket(Object key) {
+        return buckets.buckets[Math.abs(key.hashCode()) % buckets.buckets.length];
     }
 
     private Node<K, V> getNode(Object key) {
@@ -127,6 +156,7 @@ public class CollaborativeHashMap<K, V>{
 
         var bucket = getBucket(key);
         bucket.add(new Node<K, V>(key.hashCode(), key, value, null));
+        size++;
         rebuildIfNeed();
         return null;
     }
@@ -136,6 +166,7 @@ public class CollaborativeHashMap<K, V>{
         if (node == null) return null;
         var bucket = getBucket(key);
         bucket.remove(node);
+        size--;
         rebuildIfNeed();
         return null;
     }
