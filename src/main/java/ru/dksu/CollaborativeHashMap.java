@@ -55,7 +55,7 @@ public class CollaborativeHashMap<K, V>{
         public ConcurrentLinkedDeque<CollaborativeHashMap.Node<K, V>>[] buckets;
 
         // FORK JOIN POOL ========================================================
-        private final ForkJoinPool forkJoinPool = new ForkJoinPool(5);
+        private final ForkJoinPool forkJoinPool = new ForkJoinPool(8);
 
         public void rebuild(int newBucketsNumber) {
             System.gc();
