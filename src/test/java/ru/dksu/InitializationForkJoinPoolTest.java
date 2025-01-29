@@ -11,5 +11,12 @@ class InitializationForkJoinPoolTest {
     void test() {
         var array = new InitializationForkJoinPool<>();
         array.start();
+        array.start();
+        int n = 20;
+        long sum = 0;
+        for (int i = 0; i < n; i++) {
+            sum += array.start();
+        }
+        System.out.println("Mean time: " + sum / n);
     }
 }
