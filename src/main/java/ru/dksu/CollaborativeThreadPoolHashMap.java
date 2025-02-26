@@ -6,7 +6,7 @@ import java.util.concurrent.*;
 public class CollaborativeThreadPoolHashMap<K, V>{
     private Buckets<K, V> buckets = new Buckets<>();
     private int size = 0;
-    private Map<Integer, List<Long>> rebuildTimes = new HashMap<>();
+    public static Map<Integer, LinkedList<Long>> rebuildTimes = new HashMap<>();
 
     public CollaborativeThreadPoolHashMap() {
         int bucketsSize = 16;
@@ -20,7 +20,7 @@ public class CollaborativeThreadPoolHashMap<K, V>{
     static class Buckets<K, V> {
         public ConcurrentLinkedDeque<CollaborativeThreadPoolHashMap.Node<K, V>>[] buckets;
 
-        private final int nThreads = 1;
+        private final int nThreads = 5;
         private final ExecutorService threadPool = Executors.newFixedThreadPool(nThreads);
 
         public void rebuild(int newBucketsNumber) {
@@ -58,7 +58,11 @@ public class CollaborativeThreadPoolHashMap<K, V>{
             }));
 
             buckets = newBuckets;
-            System.out.println("Time rebuild:           " + (System.nanoTime() - nanoStart));
+            Long timeExecuted = System.nanoTime() - nanoStart;
+            rebuildTimes.putIfAbsent(buckets.length, new LinkedList<>());
+//            rebuildTimes.compute(buckets.length, k -> )
+            rebuildTimes.get(buckets.length).add(timeExecuted);
+            System.out.println("Time rebuild:           " + (timeExecuted));
         }
     }
 
