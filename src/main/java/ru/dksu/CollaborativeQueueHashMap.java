@@ -1,5 +1,7 @@
 package ru.dksu;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -128,15 +130,18 @@ public class CollaborativeQueueHashMap<K, V> {
 
 
     static class Buckets<K, V> {
+        private static final int TRIES_THRESHOLD = 10;
         final private Random random = new Random();
         public ConcurrentLinkedDeque<CollaborativeQueueHashMap.Node<K, V>>[] buckets;
         public ReadWriteLock[] rwlocks;
+        public int[] seqLocks;
         public AtomicInteger size = new AtomicInteger(0);
 //        volatile int size = 0;
 //        public Lock overallLock = new ReentrantLock();
 
         public Buckets(int bucketsSize) {
             buckets = new ConcurrentLinkedDeque[bucketsSize];
+            seqLocks = new int[bucketsSize];
             rwlocks = new ReadWriteLock[bucketsSize];
         }
 
@@ -145,46 +150,70 @@ public class CollaborativeQueueHashMap<K, V> {
         }
 
         public V get(K key) throws InterruptedException {
+            var varHandle = MethodHandles.arrayElementVarHandle(int[].class);
             int bucketIndex = bucketIndex(key);
-            var lock = rwlocks[bucketIndex].readLock();
-            if (!lock.tryLock(1, TimeUnit.MILLISECONDS)) {
-                throw new InterruptedException();
-            }
-            try {
+            int tries = 0;
+            while (true) {
+                int before = (int) varHandle.getAcquire(this.seqLocks, bucketIndex);
+                if (before % 2 != 0) {
+                    tries++;
+                    if (tries > TRIES_THRESHOLD) {
+                        throw new InterruptedException();
+                    }
+                    Thread.yield();
+                    continue;
+                }
                 var bucket = buckets[bucketIndex];
+                V ans = null;
                 for (var el : bucket) {
                     if (el.key.equals(key)) {
-                        return el.value;
+                        ans = el.value;
+                        break;
                     }
                 }
-                return null;
-            } finally {
-                lock.unlock();
+                if ((int) varHandle.getAcquire(this.seqLocks, bucketIndex) == before) {
+                    return ans;
+                }
             }
         }
 
         public V put(K key, V value) throws InterruptedException {
+            var varHandle = MethodHandles.arrayElementVarHandle(int[].class);
             int bucketIndex = bucketIndex(key);
-            var lock = rwlocks[bucketIndex].writeLock();
-            if (!lock.tryLock(1, TimeUnit.MILLISECONDS)) {
-                throw new InterruptedException();
-            }
-            try {
-                var bucket = buckets[bucketIndex];
-                for (var el : bucket) {
-                    if (el.key.equals(key)) {
-                        var oldValue = el.value;
-                        el.value = value;
-                        return oldValue;
+            int tries = 0;
+            int before;
+            while (true) {
+                before = (int) varHandle.getAcquire(this.seqLocks, bucketIndex);
+                if (before % 2 != 0 || !varHandle.compareAndSet(this.seqLocks, bucketIndex, before, before+1)) {
+                    tries++;
+                    if (tries > TRIES_THRESHOLD) {
+                        throw new InterruptedException();
                     }
+                    Thread.yield();
+                } else {
+                    break;
                 }
+            }
+
+            var bucket = buckets[bucketIndex];
+            V prev = null;
+            for (var el : bucket) {
+                if (el.key.equals(key)) {
+                    prev = el.value;
+                    el.value = value;
+                    break;
+                }
+            }
+            if (prev == null) {
                 bucket.add(new Node<K, V>(key.hashCode(), key, value, null));
                 size.incrementAndGet();
-//                size++;
-                return null;
-            } finally {
-                lock.unlock();
             }
+
+            if (!varHandle.compareAndSet(this.seqLocks, bucketIndex, before+1, before+2)) {
+                throw new RuntimeException("Hmmm");
+            }
+
+            return prev;
         }
     }
 
@@ -230,9 +259,22 @@ public class CollaborativeQueueHashMap<K, V> {
     private void rebuild() {
         if (rebuildLock.tryLock()) {
             try {
-                for (var lock: buckets.rwlocks) {
-                    lock.writeLock().lock();
+                for (int i = 0; i < buckets.seqLocks.length; i++) {
+                    VarHandle varHandle = MethodHandles.arrayElementVarHandle(int[].class);
+                    while (true) {
+                        int before = (int) varHandle.getAcquire(buckets.seqLocks, i);
+                        if (before % 2 != 0) {
+                            Thread.yield();;
+                            continue;
+                        }
+                        if (!varHandle.compareAndSet(buckets.seqLocks, i, before, before+1)) {
+                            Thread.yield();
+                            continue;
+                        }
+                        break;
+                    }
                 }
+                var nanoStart = System.nanoTime();
 
                 // создаем новые бакеты
                 var newBuckets = new Buckets<K, V>(buckets.buckets.length * 2);
@@ -257,40 +299,38 @@ public class CollaborativeQueueHashMap<K, V> {
                         newBuckets.buckets.length
                 );
                 collaborativeQueue.add(initTaskFinal);
-                var nanoStart = System.nanoTime();
-//                System.out.println("Finish creating tasks");
-                collaborativeQueue.helpIfNeed();
-                Long timeExecuted = System.nanoTime() - nanoStart;
-//                System.out.println("Waiting of finish initialization");
-                while (!collaborativeQueue.isFinished()) {
-                    Thread.yield();
-                }
-
-
-                startIndex = 0;
-                endIndex = delta;
-                while (endIndex < newBuckets.buckets.length) {
-                    RebuildInitRwTask<K, V> task = new RebuildInitRwTask<>(
-                            newBuckets,
-                            startIndex,
-                            endIndex
-                    );
-                    startIndex += delta;
-                    endIndex += delta;
-                    collaborativeQueue.add(task);
-                }
-                RebuildInitRwTask<K, V> initTaskRwFinal = new RebuildInitRwTask<>(
-                        newBuckets,
-                        startIndex,
-                        newBuckets.buckets.length
-                );
-                collaborativeQueue.add(initTaskRwFinal);
 //                System.out.println("Finish creating tasks");
                 collaborativeQueue.helpIfNeed();
 //                System.out.println("Waiting of finish initialization");
                 while (!collaborativeQueue.isFinished()) {
                     Thread.yield();
                 }
+
+
+//                startIndex = 0;
+//                endIndex = delta;
+//                while (endIndex < newBuckets.buckets.length) {
+//                    RebuildInitRwTask<K, V> task = new RebuildInitRwTask<>(
+//                            newBuckets,
+//                            startIndex,
+//                            endIndex
+//                    );
+//                    startIndex += delta;
+//                    endIndex += delta;
+//                    collaborativeQueue.add(task);
+//                }
+//                RebuildInitRwTask<K, V> initTaskRwFinal = new RebuildInitRwTask<>(
+//                        newBuckets,
+//                        startIndex,
+//                        newBuckets.buckets.length
+//                );
+//                collaborativeQueue.add(initTaskRwFinal);
+////                System.out.println("Finish creating tasks");
+//                collaborativeQueue.helpIfNeed();
+////                System.out.println("Waiting of finish initialization");
+//                while (!collaborativeQueue.isFinished()) {
+//                    Thread.yield();
+//                }
 //                System.out.println("Finished initialization");
 
                 startIndex = 0;
@@ -317,6 +357,7 @@ public class CollaborativeQueueHashMap<K, V> {
                 while (!collaborativeQueue.isFinished()) {
                     Thread.yield();
                 }
+                Long timeExecuted = System.nanoTime() - nanoStart;
                 buckets = newBuckets;
                 rebuildTimes.putIfAbsent(buckets.buckets.length, new LinkedList<>());
                 rebuildTimes.get(buckets.buckets.length).add(timeExecuted);
