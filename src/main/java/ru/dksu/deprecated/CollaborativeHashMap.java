@@ -1,4 +1,4 @@
-package ru.dksu;
+package ru.dksu.deprecated;
 
 import java.util.*;
 import java.util.concurrent.*;

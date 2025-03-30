@@ -1,4 +1,4 @@
-package ru.dksu;
+package ru.dksu.deprecated;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;

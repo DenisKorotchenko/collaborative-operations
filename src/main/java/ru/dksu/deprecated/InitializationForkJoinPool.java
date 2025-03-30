@@ -1,6 +1,5 @@
-package ru.dksu;
+package ru.dksu.deprecated;
 
-import java.util.Random;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.RecursiveTask;
 
