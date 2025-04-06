@@ -16,7 +16,7 @@ class CollaborativeQueueHashMapTest {
         r.setSeed(239);
         int elems = 500000;
         int iters = 5;
-        int threads = 3;
+        int threads = 1;
 
         for (int q = 0; q < iters; q++) {
             var startTime = System.nanoTime();

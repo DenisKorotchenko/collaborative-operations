@@ -11,11 +11,15 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 public class CollaborativeQueueHashMap<K, V> {
     private Buckets<K, V> buckets;
-    public static Map<Integer, LinkedList<Long>> rebuildTimes = new HashMap<>();
-    public static Map<Integer, LinkedList<Long>> snapshotTimes = new HashMap<>();
+    public Map<Integer, LinkedList<Long>> rebuildTimes = new HashMap<>();
+    public Map<Integer, LinkedList<Long>> snapshotTimes = new HashMap<>();
     private final CollaborativeQueue<CollaborativeTask> collaborativeQueue = new CollaborativeQueue<>();
 
-    public CollaborativeQueueHashMap(int bucketsSize) {
+    public CollaborativeQueueHashMap(int bucketsSize,
+                                     Map<Integer, LinkedList<Long>> rebuildTimes,
+                                     Map<Integer, LinkedList<Long>> snapshotTimes) {
+        this.rebuildTimes = rebuildTimes;
+        this.snapshotTimes = snapshotTimes;
         this.buckets = new Buckets<>(bucketsSize);
         for (int i = 0; i < bucketsSize; i++) {
             buckets.buckets[i] = new ArrayDeque<>();
@@ -267,10 +271,11 @@ public class CollaborativeQueueHashMap<K, V> {
 
         List<Collection<KeyValue<K, V>>> partialSnapshots = Collections.synchronizedList(new ArrayList<>());
 
+        long startTime = System.nanoTime();
+
         int delta = 8192;
         int startIndex = 0;
         int endIndex = delta;
-        long startTime = System.nanoTime();
         while (endIndex < buckets.buckets.length) {
             CollaborativeTask task = new CopyToPartial<>(
                     partialSnapshots,
@@ -292,14 +297,12 @@ public class CollaborativeQueueHashMap<K, V> {
 
         int overallSize = size();
         KeyValue<K, V>[] snapshot = new KeyValue[overallSize];
-        collaborativeQueue.helpIfNeed();
+        collaborativeQueue.helpIfNeeded();
         collaborativeQueue.waitForFinish();
-        long timeExecuted = System.nanoTime() - startTime;
         int curSize = 0;
         int ind = 0;
 
         Collection<KeyValue<K, V>>[] partialSnapshotsArray = (Collection<KeyValue<K,V>>[]) partialSnapshots.toArray(new Collection[0]);
-
 
         for (var part: partialSnapshots) {
             CollaborativeTask task = new CopyPartialToSnapshot<>(
@@ -313,9 +316,10 @@ public class CollaborativeQueueHashMap<K, V> {
             collaborativeQueue.add(task);
         }
 
-        collaborativeQueue.helpIfNeed();
+        collaborativeQueue.helpIfNeeded();
         collaborativeQueue.waitForFinish();
 
+        long timeExecuted = System.nanoTime() - startTime;
         snapshotTimes.putIfAbsent(overallSize, new LinkedList<>());
         snapshotTimes.get(overallSize).add(timeExecuted);
 
@@ -470,7 +474,7 @@ public class CollaborativeQueueHashMap<K, V> {
                         buckets.buckets.length
                 );
                 collaborativeQueue.add(taskFinal);
-                collaborativeQueue.helpIfNeed();
+                collaborativeQueue.helpIfNeeded();
                 collaborativeQueue.waitForFinish();
                 Long timeExecuted = System.nanoTime() - nanoStart;
                 buckets = newBuckets;
@@ -514,10 +518,28 @@ public class CollaborativeQueueHashMap<K, V> {
             try {
                 return buckets.get(key);
             } catch (InterruptedException ignored) {
-                collaborativeQueue.helpIfNeed();
+                collaborativeQueue.helpIfNeeded();
             }
         }
     }
+//
+//    private Lock lock = new ReentrantLock();
+//
+//    protected boolean tryLock() {
+//        // сложный код взятия блокировки
+//        boolean result = ... // результат получения блокировки
+//        if (!result) {
+//            collaborativeQueue.helpIfNeeded();
+//        }
+//        return result;
+//    }
+//
+//    public V operation(K parameter) {
+//        while (!lock.tryLock()) {
+//            collaborativeQueue.helpIfNeeded();
+//        }
+//        // основной код операции
+//    }
 
     public V put(K key, V value) {
         V result = null;
@@ -526,7 +548,7 @@ public class CollaborativeQueueHashMap<K, V> {
                 result = buckets.put(key, value);
                 break;
             } catch (InterruptedException e) {
-                collaborativeQueue.helpIfNeed();
+                collaborativeQueue.helpIfNeeded();
             }
         }
         rebuildIfNeed();

@@ -1,128 +1,111 @@
 package ru.dksu;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class Main {
-    public static void main(String[] args) {
-        var array = new InitializationForkJoinPool(1);
-        array.start(0);
-        array.start(1);
-        int n = 20;
-        long sum = 0;
-        for (int i = 0; i < n; i++) {
-            sum += array.start(i);
-        }
-        System.out.println("Mean time: " + sum / n);
-    }
-
-    private static final int[] array = new int[1000000000];
-
-    public static class InitializationFixedThreadPool {
-        private final ExecutorService threadPoolExecutor;
-        private final int nThreads;
-
-        public InitializationFixedThreadPool(int nThreads) {
-            threadPoolExecutor = Executors.newFixedThreadPool(nThreads);
-            this.nThreads = nThreads;
+    public static void main(String[] args) throws InterruptedException {
+        Random r = new Random();
+        r.setSeed(239);
+        int elems = 500000;
+        int iters = 100;
+        int itersDelta = iters / 5;
+        int threadsMin = Integer.valueOf(args[0]);
+        int threadsMax = Integer.valueOf(args[1]);
+        System.out.println("Threads, from: " + threadsMin + "; to: " + threadsMax);
+        HashMap<Integer, Map<Integer, LinkedList<Long>>> mSnapshotTimes = new HashMap<>(), mRebuildTimes = new HashMap<>();
+        for (int threads = threadsMin; threads <= threadsMax; threads++) {
+            mRebuildTimes.put(threads, new HashMap<>());
+            mSnapshotTimes.put(threads, new HashMap<>());
         }
 
-        long start(int val) {
-            System.gc();
-            long nanoStart = System.nanoTime();
-            List<Runnable> list = new ArrayList<>();
-            for (int t = 0; t < nThreads; t++) {
-                int finalT = t;
-                list.add(new Runnable() {
-                    @Override
-                    public void run() {
-                        System.out.println("Started: " + Thread.currentThread());
-                        int from = (int)((long) array.length * (long) finalT / (long) nThreads);
-                        int to = (int)((long) array.length * (long) (finalT + 1) / (long) nThreads);
-                        long stTime = System.nanoTime();
-                        for (long i = from; i < to; i++) {
-                            array[(int)i] = val * 239 + 7;
+        for (int q = 0; q < iters; q++) {
+//            var collaborativeHashMap = new CollaborativeQueueHashMap<>(16);
+//            var baseHashMap = new HashMap<Integer, Integer>();
+            for (int threads = threadsMin; threads <= threadsMax; threads++) {
+                var startTime = System.nanoTime();
+                AtomicInteger done = new AtomicInteger(0);
+                LinkedList<Thread> runs = new LinkedList<>();
+                var collaborativeHashMap = new CollaborativeQueueHashMap<>(16, mRebuildTimes.get(threads), mSnapshotTimes.get(threads));
+                for (int i = 0; i < threads; i++) {
+                    int finalI = i;
+                    var thread = new Thread() {
+                        @Override
+                        public void run() {
+                            boolean flg = false;
+                            if (finalI == 0) {
+                                flg = true;
+                            }
+                            System.out.println("Start thread " + Thread.currentThread().getName());
+                            Random localR = new Random();
+                            int operations = 0;
+                            localR.setSeed(r.nextInt());
+                            while (done.getAndIncrement() < elems / 1000) {
+                                for (int q = 0; q < 1000; q++) {
+                                    var key = localR.nextInt();
+                                    var value = localR.nextInt();
+                                    collaborativeHashMap.put(key, value);
+                                    operations++;
+                                    key = localR.nextInt();
+                                    collaborativeHashMap.get(key);
+                                }
+                                if (finalI == 0 && done.get() > elems / 2000 && flg) {
+                                    flg = false;
+                                    System.out.println(collaborativeHashMap.snapshot().length);
+                                }
+                            }
+                            System.out.println("Finish thread " + Thread.currentThread().getName() + " Operations count: " + operations);
                         }
-                        System.out.println("Finished: " + Thread.currentThread() + ", time: " + (System.nanoTime() - stTime));
-                    }
-                });
-            }
-            list.parallelStream().map((threadPoolExecutor::submit)).forEach((future -> {
-                try {
-                    future.get();
-                } catch (InterruptedException e) {
-
-                } catch (ExecutionException e) {
-
+                    };
+                    runs.add(thread);
                 }
-            }));
-
-            long nanoFinish = System.nanoTime();
-            System.out.println("Time:      " + (nanoFinish - nanoStart));
-            return nanoFinish - nanoStart;
-        }
-    }
-
-    public static class InitializationForkJoinPool {
-        private final ForkJoinPool forkJoinPool;
-
-        public InitializationForkJoinPool(int parallelism) {
-            System.out.println("Processors: " + Runtime.getRuntime().availableProcessors());
-            forkJoinPool = new ForkJoinPool(parallelism);
-            System.out.println("Parallelism: " + forkJoinPool.getParallelism());
-        }
-        //    static Random random = new Random(239);
-
-        long start(int i) {
-            var rebuild = new Initialize(0, array.length, 1, i);
-            System.gc();
-            long nanoStart = System.nanoTime();
-            forkJoinPool.invoke(rebuild);
-            long nanoFinish = System.nanoTime();
-            System.out.println("Time:      " + (nanoFinish - nanoStart));
-            return nanoFinish - nanoStart;
-        }
-
-        class Initialize extends RecursiveTask<Void> {
-            private final int from, to, depth;
-            private final int x;
-
-            Initialize(
-                    int from,
-                    int to,
-                    int depth,
-                    int x
-            ) {
-                this.from = from;
-                this.to = to;
-                this.depth = depth;
-                this.x = x;
-            }
-
-            @Override
-            protected Void compute() {
-                if (depth < 3) {
-                    int med = (from + to) / 2;
-                    var left = new Initialize(from, med, depth + 1, x);
-                    var right = new Initialize(med, to, depth + 1, x);
-                    left.fork();
-                    right.fork();
-                    left.join();
-                    right.join();
-                    return null;
+                for (var thread : runs) {
+                    thread.start();
                 }
-                System.out.println(Thread.currentThread().toString() + " started");
-                long stTime = System.nanoTime();
-                System.out.println(to - from);
-                for (int i = from; i < to; i++) {
-                    array[i] = x * 239 + 7;
+                for (var thread : runs) {
+                    thread.join();
                 }
-                System.out.println(Thread.currentThread().toString() + " finished" + ", time: " + (System.nanoTime() - stTime));
-                return null;
+                System.out.println("Size:  " + collaborativeHashMap.size());
+                System.out.println("Size2: " + collaborativeHashMap.size2());
+                System.out.println("Time:  " + (System.nanoTime() - startTime));
+//            for (int i = 0; i < elems; i++) {
+//                var key = r.nextInt();
+//                var value = r.nextInt();
+//                collaborativeHashMap.put(key, value);
+//                baseHashMap.put(key, value);
+//                Assertions.assertEquals(baseHashMap.get(key), collaborativeHashMap.get(key));
+//            }
+//            Assertions.assertEquals(baseHashMap.size(), collaborativeHashMap.size());
             }
         }
 
+        for (int threads = threadsMin; threads <= threadsMax; threads++) {
+            var rebuildTimes = mRebuildTimes.get(threads);
+            var snapshotTimes = mSnapshotTimes.get(threads);
 
+            var rebuildKeys = rebuildTimes.keySet().stream().sorted().toArray();
+            var rebuildKey = rebuildKeys[rebuildKeys.length - 1];
+            var rebuildValues = rebuildTimes.get(rebuildKey).stream().sorted().toList().subList(itersDelta, iters - itersDelta);
+            Long rebuildValuesSum = 0L;
+            for (Long value : rebuildValues) {
+                rebuildValuesSum += value;
+            }
+            Long rebuildMeanValue = rebuildValuesSum / rebuildValues.size();
+            System.out.println("Threads: " + threads + ". Mean rebuild time: " + rebuildMeanValue);
+
+            Long snapshotValuesSum = 0L;
+            List<Long> snapshotValues = new LinkedList<Long>();
+            for (var el: snapshotTimes.values()) {
+                snapshotValues.addAll(el);
+            }
+            snapshotValues = snapshotValues.stream().sorted().toList().subList(itersDelta, iters - itersDelta);
+            for (Long value : snapshotValues) {
+                snapshotValuesSum += value;
+            }
+
+            var snapshotMeanValue = snapshotValuesSum / snapshotValues.size();
+            System.out.println("Threads: " + threads + ". Mean snapshot time: " + snapshotMeanValue);
+        }
     }
 }

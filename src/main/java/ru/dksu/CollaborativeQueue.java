@@ -23,7 +23,7 @@ public class CollaborativeQueue<TaskT extends CollaborativeTask> {
         }
     }
 
-    public void helpIfNeed() {
+    public void helpIfNeeded() {
         if (tasksQueue.isEmpty()) {
             return;
         }
