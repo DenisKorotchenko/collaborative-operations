@@ -16,6 +16,13 @@ public class CollaborativeQueue<TaskT extends CollaborativeTask> {
         return inProgress.get() == 0 && tasksQueue.isEmpty();
     }
 
+    // может вызывать только тот поток, который добавлял до этого таски
+    public void waitForFinish() {
+        while (!isFinished()) {
+            Thread.yield();
+        }
+    }
+
     public void helpIfNeed() {
         if (tasksQueue.isEmpty()) {
             return;

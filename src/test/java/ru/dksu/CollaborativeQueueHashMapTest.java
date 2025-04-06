@@ -25,9 +25,14 @@ class CollaborativeQueueHashMapTest {
             LinkedList<Thread> runs = new LinkedList<>();
             AtomicInteger done = new AtomicInteger(0);
             for (int i = 0; i < threads; i++) {
+                int finalI = i;
                 var thread = new Thread() {
                     @Override
                     public void run() {
+                        boolean flg = false;
+                        if (finalI == 0) {
+                            flg = true;
+                        }
                         System.out.println("Start thread " + Thread.currentThread().getName());
                         Random localR = new Random();
                         int operations = 0;
@@ -40,6 +45,10 @@ class CollaborativeQueueHashMapTest {
                                 operations++;
                                 key = localR.nextInt();
                                 collaborativeHashMap.get(key);
+                            }
+                            if (finalI == 0 && done.get() > elems / 2000 && flg) {
+                                flg = false;
+                                System.out.println(collaborativeHashMap.snapshot().length);
                             }
                         }
                         System.out.println("Finish thread " + Thread.currentThread().getName() + " Operations count: " + operations);
@@ -77,6 +86,17 @@ class CollaborativeQueueHashMapTest {
         }
         Long meanValue = valuesSum / values.size();
         System.out.println("Mean rebuild time: " + meanValue);
+
+        long sz = 0;
+        long timeSum = 0;
+        for (var el : CollaborativeQueueHashMap.snapshotTimes.entrySet()) {
+            sz += el.getValue().size();
+            for (var el2 : el.getValue()) {
+                timeSum += el2;
+            }
+        }
+        meanValue = timeSum / sz;
+        System.out.println("Snapshot time: " + meanValue);
     }
 
     @Disabled
