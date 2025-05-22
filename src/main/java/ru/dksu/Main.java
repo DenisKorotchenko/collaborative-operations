@@ -52,7 +52,7 @@ public class Main {
                                 }
                                 if (finalI == 0 && done.get() > elems / 2000 && flg) {
                                     flg = false;
-                                    System.out.println(collaborativeHashMap.snapshot().length);
+                                    System.out.println(collaborativeHashMap.snapshot().size());
                                 }
                             }
                             System.out.println("Finish thread " + Thread.currentThread().getName() + " Operations count: " + operations);
