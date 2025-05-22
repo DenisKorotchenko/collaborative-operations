@@ -1,7 +1,6 @@
 package ru.dksu;
 
 import java.util.*;
-import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class Main {
@@ -67,7 +66,7 @@ public class Main {
                     thread.join();
                 }
                 System.out.println("Size:  " + collaborativeHashMap.size());
-                System.out.println("Size2: " + collaborativeHashMap.size2());
+                System.out.println("Size2: " + collaborativeHashMap.sizeUnsafe());
                 System.out.println("Time:  " + (System.nanoTime() - startTime));
 //            for (int i = 0; i < elems; i++) {
 //                var key = r.nextInt();

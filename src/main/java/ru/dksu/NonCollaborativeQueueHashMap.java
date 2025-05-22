@@ -11,7 +11,7 @@ import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
-public class QueueHashMap<K, V> implements CompositionalMap<K, V> {
+public class NonCollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
     // For benchmarks
     private boolean benchmarking = false;
     public Map<Integer, LinkedList<Long>> rebuildTimes = new HashMap<>();
@@ -20,7 +20,7 @@ public class QueueHashMap<K, V> implements CompositionalMap<K, V> {
     private Buckets<K, V> buckets;
     private final ReadWriteLock toAllLock = new ReentrantReadWriteLock();
 
-    public QueueHashMap() {
+    public NonCollaborativeQueueHashMap() {
         this(
                 16,
                 new HashMap<>(),
@@ -28,9 +28,9 @@ public class QueueHashMap<K, V> implements CompositionalMap<K, V> {
         );
     }
 
-    public QueueHashMap(int bucketsSize,
-                        Map<Integer, LinkedList<Long>> rebuildTimes,
-                        Map<Integer, LinkedList<Long>> snapshotTimes) {
+    public NonCollaborativeQueueHashMap(int bucketsSize,
+                                        Map<Integer, LinkedList<Long>> rebuildTimes,
+                                        Map<Integer, LinkedList<Long>> snapshotTimes) {
         this(
                 bucketsSize,
                 rebuildTimes,
@@ -39,10 +39,10 @@ public class QueueHashMap<K, V> implements CompositionalMap<K, V> {
         );
     }
 
-    public QueueHashMap(int bucketsSize,
-                        Map<Integer, LinkedList<Long>> rebuildTimes,
-                        Map<Integer, LinkedList<Long>> snapshotTimes,
-                        boolean benchmarking) {
+    public NonCollaborativeQueueHashMap(int bucketsSize,
+                                        Map<Integer, LinkedList<Long>> rebuildTimes,
+                                        Map<Integer, LinkedList<Long>> snapshotTimes,
+                                        boolean benchmarking) {
         this.rebuildTimes = rebuildTimes;
         this.snapshotTimes = snapshotTimes;
         this.buckets = new Buckets<>(bucketsSize);
@@ -256,7 +256,17 @@ public class QueueHashMap<K, V> implements CompositionalMap<K, V> {
     }
 
     public ArrayList<KeyValue<K, V>> snapshot() {
-        return snapshotUnsafe();
+        while (true) {
+            if (toAllLock.writeLock().tryLock()) {
+                try {
+                    return snapshotUnsafe();
+                } finally {
+                    toAllLock.writeLock().unlock();
+                }
+            } else {
+                Thread.yield();
+            }
+        }
     }
 
     public ArrayList<KeyValue<K, V>> snapshotUnsafe() {
@@ -277,15 +287,25 @@ public class QueueHashMap<K, V> implements CompositionalMap<K, V> {
             V start,
             BiFunction<V, V, V> function
     ) {
-        V res = start;
-        for (var bucket: buckets.buckets) {
-            if (bucket != null) {
-                for (var el: bucket) {
-                    res = function.apply(res, el.value);
+        while (true) {
+            if (toAllLock.writeLock().tryLock()) {
+                try {
+                    V res = start;
+                    for (var bucket: buckets.buckets) {
+                        if (bucket != null) {
+                            for (var el: bucket) {
+                                res = function.apply(res, el.value);
+                            }
+                        }
+                    }
+                    return res;
+                } finally {
+                    toAllLock.writeLock().unlock();
                 }
+            } else {
+                Thread.yield();
             }
         }
-        return res;
     }
 
     // Collaborative tasks for rebuilding

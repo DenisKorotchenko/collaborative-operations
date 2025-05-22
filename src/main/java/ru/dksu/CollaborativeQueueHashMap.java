@@ -3,22 +3,26 @@ package ru.dksu;
 import contention.abstractions.CompositionalMap;
 
 import java.lang.invoke.MethodHandles;
-import java.lang.invoke.VarHandle;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 
 public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
-    private Buckets<K, V> buckets;
+    // For benchmarks
+    private boolean benchmarking = false;
     public Map<Integer, LinkedList<Long>> rebuildTimes = new HashMap<>();
     public Map<Integer, LinkedList<Long>> snapshotTimes = new HashMap<>();
+
+    private Buckets<K, V> buckets;
     private final CollaborativeQueue<CollaborativeTask> collaborativeQueue = new CollaborativeQueue<>();
+    private final ReadWriteLock toAllLock = new ReentrantReadWriteLock();
+
+    // How much buckets put into one collaborative task
+    private final int DELTA = 2;
 
     public CollaborativeQueueHashMap() {
         this(
@@ -31,15 +35,25 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
     public CollaborativeQueueHashMap(int bucketsSize,
                                      Map<Integer, LinkedList<Long>> rebuildTimes,
                                      Map<Integer, LinkedList<Long>> snapshotTimes) {
+        this(
+                bucketsSize,
+                rebuildTimes,
+                snapshotTimes,
+                false
+        );
+    }
+
+    public CollaborativeQueueHashMap(int bucketsSize,
+                                     Map<Integer, LinkedList<Long>> rebuildTimes,
+                                     Map<Integer, LinkedList<Long>> snapshotTimes,
+                                     boolean benchmarking) {
         this.rebuildTimes = rebuildTimes;
         this.snapshotTimes = snapshotTimes;
         this.buckets = new Buckets<>(bucketsSize);
         for (int i = 0; i < bucketsSize; i++) {
             buckets.buckets[i] = new ArrayDeque<>();
         }
-        for (int i = 0; i < buckets.rwlocks.length; i++) {
-            buckets.rwlocks[i] = new ReentrantReadWriteLock();
-        }
+        this.benchmarking = benchmarking;
     }
 
     static class Node<K,V> implements Entry<K,V> {
@@ -81,16 +95,13 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
 
     static class Buckets<K, V> {
         private static final int TRIES_THRESHOLD = 10;
-        final private Random random = new Random();
-        public Deque<Node<K, V>>[] buckets;
-        public ReadWriteLock[] rwlocks;
-        public int[] seqLocks;
-        public AtomicInteger size = new AtomicInteger(0);
+        private final Deque<Node<K, V>>[] buckets;
+        private final int[] seqLocks;
+        private final AtomicInteger size = new AtomicInteger(0);
 
         public Buckets(int bucketsSize) {
             buckets = new ArrayDeque[bucketsSize];
             seqLocks = new int[bucketsSize];
-            rwlocks = new ReadWriteLock[bucketsSize];
         }
 
         private int bucketIndex(K key, int size) {
@@ -129,14 +140,15 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
                 if ((int) varHandle.getAcquire(this.seqLocks, bucketIndex) == before) {
                     return ans;
                 }
+                tries++;
             }
         }
 
-        public V put(K key, V value) throws InterruptedException {
-            return put(key, value, true);
+        public V put(K key, V value, boolean ifAbsent) throws InterruptedException {
+            return put(key, value, ifAbsent, true);
         }
 
-        private V put(K key, V value, boolean changeSize) throws InterruptedException {
+        private V put(K key, V value, boolean ifAbsent, boolean changeSize) throws InterruptedException {
             var varHandle = MethodHandles.arrayElementVarHandle(int[].class);
             int tries = 0;
             int before;
@@ -166,7 +178,9 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
             for (var el : bucket) {
                 if (el.key.equals(key)) {
                     prev = el.value;
-                    el.value = value;
+                    if (!ifAbsent) {
+                        el.value = value;
+                    }
                     break;
                 }
             }
@@ -245,39 +259,7 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
         }
     }
 
-    private void getAllLocks(int from, int to) {
-        for (int i = from; i < to; i++) {
-            while (true) {
-                int before = (int) varHandle.getAcquire(buckets.seqLocks, i);
-                if (before % 2 != 0) {
-                    Thread.yield();
-//                    throw new RuntimeException("");
-                    continue;
-                }
-                if (!varHandle.compareAndSet(buckets.seqLocks, i, before, before+1)) {
-                    Thread.yield();
-//                    throw new RuntimeException();
-                    continue;
-                }
-                break;
-            }
-        }
-    }
-
-    private VarHandle varHandle = MethodHandles.arrayElementVarHandle(int[].class);
-
-    private void unlockAll() {
-        for (int i = 0; i < buckets.seqLocks.length; i++) {
-            int before = (int) varHandle.get(buckets.seqLocks, i);
-            if (before % 2 != 1) {
-                throw new RuntimeException("Unexpected seqlock");
-            }
-            if (!varHandle.compareAndSet(buckets.seqLocks, i, before, before+1)) {
-                throw new RuntimeException("Unexpected seqlock state");
-            }
-        }
-    }
-
+    // Tasks for snapshot
     private static class CopyToPartial<K, V> implements CollaborativeTask {
         Collection<KeyValue<K, V>> partialSnapshot;
         Buckets<K, V> buckets;
@@ -340,22 +322,11 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
 
     public ArrayList<KeyValue<K, V>> snapshot() {
         while (true) {
-            if (lockForAllLocks.tryLock()) {
+            if (toAllLock.writeLock().tryLock()) {
                 try {
-                    while (true) {
-                        if (snapshotLock.writeLock().tryLock()) {
-                            try {
-                                return snapshotUnsafe();
-                            } finally {
-                                snapshotLock.writeLock().unlock();
-                            }
-                        } else {
-                            collaborativeQueue.helpIfNeeded();
-                            Thread.yield();
-                        }
-                    }
+                    return snapshotUnsafe();
                 } finally {
-                    lockForAllLocks.unlock();
+                    toAllLock.writeLock().unlock();
                 }
             } else {
                 collaborativeQueue.helpIfNeeded();
@@ -369,11 +340,10 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
 
         long startTime = System.nanoTime();
 
-        int delta = 1024;
+        int delta = DELTA;
         int startIndex = 0;
         int endIndex = delta;
         while (endIndex < buckets.buckets.length) {
-//            getAllLocks(startIndex, endIndex);
             var partialSnapshot = new ArrayList<KeyValue<K, V>>();
             partialSnapshots.add(partialSnapshot);
             CollaborativeTask task = new CopyToPartial<>(
@@ -388,7 +358,6 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
         }
         var partialSnapshot = new ArrayList<KeyValue<K, V>>();
         partialSnapshots.add(partialSnapshot);
-//        getAllLocks(startIndex, buckets.buckets.length);
         CollaborativeTask taskFinal = new CopyToPartial<>(
                 partialSnapshot,
                 buckets,
@@ -401,64 +370,154 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
         ArrayList<KeyValue<K, V>> snapshot = new ArrayList<>();
         collaborativeQueue.helpIfNeeded();
         collaborativeQueue.waitForFinish();
+
         int curSize = 0;
         int ind = 0;
-
-//        unlockAll();
-//        Collection<KeyValue<K, V>>[] partialSnapshotsArray = (Collection<KeyValue<K,V>>[]) partialSnapshots.toArray(new Collection[0]);
-
         for (var part: partialSnapshots) {
-//            CollaborativeTask task = new CopyPartialToSnapshot<>(
-//                    partialSnapshots,
-//                    curSize,
-//                    snapshot,
-//                    ind,
-//                    ++ind
-//            );
-//            curSize += part.size();
+            CollaborativeTask task = new CopyPartialToSnapshot<>(
+                    partialSnapshots,
+                    curSize,
+                    snapshot,
+                    ind,
+                    ++ind
+            );
+            curSize += part.size();
             snapshot.addAll(part);
-//            collaborativeQueue.add(task);
+            collaborativeQueue.add(task);
         }
 
-//        collaborativeQueue.helpIfNeeded();
-//        collaborativeQueue.waitForFinish();
+        collaborativeQueue.helpIfNeeded();
+        collaborativeQueue.waitForFinish();
 
-        long timeExecuted = System.nanoTime() - startTime;
-        snapshotTimes.putIfAbsent(overallSize, new LinkedList<>());
-        snapshotTimes.get(overallSize).add(timeExecuted);
-
+        if (benchmarking) {
+            long timeExecuted = System.nanoTime() - startTime;
+            snapshotTimes.putIfAbsent(overallSize, new LinkedList<>());
+            snapshotTimes.get(overallSize).add(timeExecuted);
+        }
 
         return snapshot;
     }
 
-
-
-
-    private Lock lockForAllLocks = new ReentrantLock();
-
-    private static class RebuildInitTask<K, V> implements CollaborativeTask {
-        Buckets<K,V> newBuckets;
-        int currentIndex;
-        int endIndex;
-
-        public RebuildInitTask(
-                Buckets<K, V> newBuckets,
-                int startIndex,
-                int endIndex
-        ) {
-            this.newBuckets = newBuckets;
-            this.currentIndex = startIndex;
-            this.endIndex = endIndex;
-        }
-
-        public void start() {
-            while (currentIndex < endIndex) {
-                newBuckets.buckets[currentIndex] = new ArrayDeque<>();
-                currentIndex++;
+    public V reduce(
+            V start,
+            BiFunction<V, V, V> function
+    ) {
+        while (true) {
+            if (toAllLock.writeLock().tryLock()) {
+                ArrayList<V> results;
+                try {
+                    results = reduceUnsafe(start, function);
+                    V result = start;
+                    for (V partResult: results) {
+                        result = function.apply(result, partResult);
+                    }
+                    return result;
+                } finally {
+                    toAllLock.writeLock().unlock();
+                }
+            } else {
+                collaborativeQueue.helpIfNeeded();
+                Thread.yield();
             }
         }
     }
 
+    // Collaborative tasks for reduce operation
+    private static class ReducePartTask<K, V> implements CollaborativeTask {
+        final ArrayList<V> results;
+        final int resultIndex;
+        final Buckets<K, V> buckets;
+        int currentIndex;
+        final int endIndex;
+        final V start;
+        final BiFunction<V, V, V> function;
+
+        ReducePartTask(
+                ArrayList<V> results,
+                int resultIndex,
+                Buckets<K, V> buckets,
+                int startIndex,
+                int endIndex,
+                V start,
+                BiFunction<V, V, V> function
+        ) {
+            this.results = results;
+            this.resultIndex = resultIndex;
+            this.buckets = buckets;
+            this.currentIndex = startIndex;
+            this.endIndex = endIndex;
+            this.start = start;
+            this.function = function;
+        }
+
+        @Override
+        public void start() {
+            V res = start;
+            if ((int) start != 0) {
+                throw new RuntimeException("!" + start.toString());
+            }
+            for (; currentIndex < endIndex; currentIndex++) {
+                if (buckets.buckets[currentIndex] != null) {
+                    for (var el : buckets.buckets[currentIndex]) {
+                        res = function.apply(res, el.value);
+                    }
+                }
+            }
+//            if (results.get(resultIndex) != start && res != results.get(resultIndex)) {
+//                throw new RuntimeException(res.toString() + " " + results.get(resultIndex).toString());
+//            }
+            if ((int) results.get(resultIndex) != 0) {
+                throw new RuntimeException(results.get(resultIndex).toString());
+            }
+            results.set(resultIndex, res);
+        }
+    }
+
+    private ArrayList<V> reduceUnsafe(
+            V start,
+            BiFunction<V, V, V> function
+    ) {
+        ArrayList<V> results = new ArrayList<>();
+        int delta = DELTA;
+        for (int i = 0; i - delta < buckets.buckets.length; i+=delta) {
+            results.add(start);
+        }
+        int startIndex = 0;
+        int endIndex = delta;
+        int index = 0;
+        while (endIndex < buckets.buckets.length) {
+            ReducePartTask<K, V> reducePartTask = new ReducePartTask<K, V>(
+                    results,
+                    index++,
+                    buckets,
+                    startIndex,
+                    endIndex,
+                    start,
+                    function
+            );
+            startIndex += delta;
+            endIndex += delta;
+            collaborativeQueue.add(reducePartTask);
+        }
+        ReducePartTask<K, V> taskFinal = new ReducePartTask<K, V>(
+                results,
+                index++,
+                buckets,
+                startIndex,
+                buckets.buckets.length,
+                start,
+                function
+        );
+//        taskFinal.start();
+        collaborativeQueue.add(taskFinal);
+
+        collaborativeQueue.helpIfNeeded();
+        collaborativeQueue.waitForFinish();
+
+        return results;
+    }
+
+    // Collaborative tasks for rebuilding
     private static class RebuildTask<K, V> implements CollaborativeTask  {
         Buckets<K,V> oldBuckets;
         Buckets<K,V> newBuckets;
@@ -487,149 +546,94 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
                 for (var el : oldBuckets.buckets[currentIndex]) {
                     while (true) {
                         try {
-                            newBuckets.put(el.key, el.value, false);
+                            newBuckets.put(el.key, el.value, false, false);
                             break;
-                        } catch (InterruptedException e) {
-                            continue;
+                        } catch (InterruptedException ignored) {
                         }
                     }
-//                    newBuckets.buckets[Math.abs(el.key.hashCode()) % newBuckets.buckets.length].add(el);
                     sizeIncrement++;
                 }
                 currentIndex++;
             }
             newBuckets.size.getAndAdd(sizeIncrement);
         }
-
-//        public RebuildTask<K, V> split() {
-//            // слишком мало осталось сделать -- нет смысла делить
-//            if (endIndex - currentIndex < MIN_SPLIT_SIZE) {
-//                return null;
-//            }
-//            int medIndex = (endIndex + currentIndex) / 2;
-//            var newTask = new RebuildTask<K, V>(
-//                    oldBuckets,
-//                    newBuckets,
-//                    medIndex,
-//                    endIndex
-//            );
-//            endIndex = medIndex;
-//            // за время разделения полностью прошли левую часть
-//            if (currentIndex >= endIndex) {
-//                throw new RuntimeException("Получили не консистентное состояние");
-//            }
-//
-//            return newTask;
-//        }
     }
 
-    private ReadWriteLock snapshotLock = new ReentrantReadWriteLock();
+    private void rebuildUnsafe(int newSize) {
+        var nanoStart = System.nanoTime();
 
-    private void rebuild(int newSize) {
+        // создаем новые бакеты
+        var newBuckets = new Buckets<K, V>(newSize);
 
-//        System.out.printf("Rebuild to %d\n", newSize);
-        // нельзя делать сразу несколько ребилдов
-
-        try {
-//                System.out.println("Rebuild started");
-            getAllLocks(0, buckets.buckets.length);
-            var nanoStart = System.nanoTime();
-
-            // создаем новые бакеты
-            var newBuckets = new Buckets<K, V>(newSize);
-
-            // начинаем создавать таски на инициализацию
-            int delta = 8192;
-            int startIndex = 0;
-            int endIndex = delta;
-//                while (endIndex < newBuckets.buckets.length) {
-//                    RebuildInitTask<K, V> task = new RebuildInitTask<>(
-//                            newBuckets,
-//                            startIndex,
-//                            endIndex
-//                    );
-//                    startIndex += delta;
-//                    endIndex += delta;
-//                    collaborativeQueue.add(task);
-//                }
-//                RebuildInitTask<K, V> initTaskFinal = new RebuildInitTask<>(
-//                        newBuckets,
-//                        startIndex,
-//                        newBuckets.buckets.length
-//                );
-//                collaborativeQueue.add(initTaskFinal);
-////                System.out.println("Finish creating tasks");
-//                collaborativeQueue.helpIfNeed();
-////                System.out.println("Waiting of finish initialization");
-//                collaborativeQueue.waitForFinish();
-
-            startIndex = 0;
-            endIndex = delta;
-            while (endIndex < buckets.buckets.length) {
-                RebuildTask<K, V> task = new RebuildTask<>(
-                        buckets,
-                        newBuckets,
-                        startIndex,
-                        endIndex
-                );
-                startIndex += delta;
-                endIndex += delta;
-                collaborativeQueue.add(task);
-            }
-            RebuildTask<K, V> taskFinal = new RebuildTask<>(
+        int delta = DELTA;
+        int startIndex = 0;
+        int endIndex = delta;
+        while (endIndex < buckets.buckets.length) {
+            RebuildTask<K, V> task = new RebuildTask<>(
                     buckets,
                     newBuckets,
                     startIndex,
-                    buckets.buckets.length
+                    endIndex
             );
-            collaborativeQueue.add(taskFinal);
-            collaborativeQueue.helpIfNeeded();
-            collaborativeQueue.waitForFinish();
+            startIndex += delta;
+            endIndex += delta;
+            collaborativeQueue.add(task);
+        }
+        RebuildTask<K, V> taskFinal = new RebuildTask<>(
+                buckets,
+                newBuckets,
+                startIndex,
+                buckets.buckets.length
+        );
+        collaborativeQueue.add(taskFinal);
+        collaborativeQueue.helpIfNeeded();
+        collaborativeQueue.waitForFinish();
+
+        buckets = newBuckets;
+
+        if (benchmarking) {
             Long timeExecuted = System.nanoTime() - nanoStart;
-            buckets = newBuckets;
             rebuildTimes.putIfAbsent(buckets.buckets.length, new LinkedList<>());
             rebuildTimes.get(buckets.buckets.length).add(timeExecuted);
-//                System.out.println("Rebuild finished");
-//            } catch (InterruptedException ignored) {
-        } finally {
-            lockForAllLocks.unlock();
         }
     }
 
     private void rebuildIfNeed() {
         while (true) {
             if (int_size() > 0.75 * buckets.buckets.length) {
-//            System.out.println("Current size before rebuild: " + size());
-                if (lockForAllLocks.tryLock()) {
-                    rebuild(buckets.buckets.length * 2);
+                if (toAllLock.writeLock().tryLock()) {
+                    try {
+                        rebuildUnsafe(buckets.buckets.length * 2);
+                    } finally {
+                        toAllLock.writeLock().unlock();
+                    }
                 } else {
                     collaborativeQueue.helpIfNeeded();
                     Thread.yield();
                 }
-//            System.out.println("Current size after  rebuild: " + size());
             } else if (int_size() < 0.25 * buckets.buckets.length && buckets.buckets.length > 2) {//size < buckets.buckets.length) {
-                if (lockForAllLocks.tryLock()) {
-                    rebuild(buckets.buckets.length / 2);
+                if (toAllLock.writeLock().tryLock()) {
+                    try {
+                        rebuildUnsafe(buckets.buckets.length / 2);
+                    } finally {
+                        toAllLock.writeLock().unlock();
+                    }
                 } else {
                     collaborativeQueue.helpIfNeeded();
                     Thread.yield();
                 }
-//            System.out.println("Current size: " + size());
             } else {
                 break;
             }
         }
     }
 
+
+
+
     @Override
     public V putIfAbsent(K k, V v) {
-        var x = get(k);
-        if (x != null) {
-            return x;
-        }
-
-        put(k, v);
-        return null;
+        return put(k, v, true);
     }
 
     @Override
@@ -723,7 +727,7 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
         return false;
     }
 
-    public int size2() {
+    public int sizeUnsafe() {
         int ans = 0;
         for (var bucket : buckets.buckets) {
             if (bucket != null) {
@@ -739,40 +743,24 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
             try {
                 return buckets.get((K) key);
             } catch (InterruptedException ignored) {
-                collaborativeQueue.helpIfNeeded();
             }
         }
     }
-//
-//    private Lock lock = new ReentrantLock();
-//
-//    protected boolean tryLock() {
-//        // сложный код взятия блокировки
-//        boolean result = ... // результат получения блокировки
-//        if (!result) {
-//            collaborativeQueue.helpIfNeeded();
-//        }
-//        return result;
-//    }
-//
-//    public V operation(K parameter) {
-//        while (!lock.tryLock()) {
-//            collaborativeQueue.helpIfNeeded();
-//        }
-//        // основной код операции
-//    }
 
     public V put(K key, V value) {
-        V result = null;
+        return put(key, value, false);
+    }
+
+    public V put(K key, V value, boolean ifAbsent) {
+        V result;
         while (true) {
-            if (snapshotLock.readLock().tryLock()) {
+            if (toAllLock.readLock().tryLock()) {
                 try {
-                    result = buckets.put(key, value);
+                    result = buckets.put(key, value, ifAbsent);
                     break;
-                } catch (InterruptedException e) {
-                    collaborativeQueue.helpIfNeeded();
+                } catch (InterruptedException ignored) {
                 } finally {
-                    snapshotLock.readLock().unlock();
+                    toAllLock.readLock().unlock();
                 }
             } else {
                 collaborativeQueue.helpIfNeeded();
@@ -790,16 +778,15 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
 
     @Override
     public V remove(Object key) {
-        V result = null;
+        V result;
         while (true) {
-            if (snapshotLock.readLock().tryLock()) {
+            if (toAllLock.readLock().tryLock()) {
                 try {
                     result = buckets.remove((K) key);
                     break;
-                } catch (InterruptedException e) {
-                    collaborativeQueue.helpIfNeeded();
+                } catch (InterruptedException ignored) {
                 } finally {
-                    snapshotLock.readLock().unlock();
+                    toAllLock.readLock().unlock();
                 }
             } else {
                 collaborativeQueue.helpIfNeeded();

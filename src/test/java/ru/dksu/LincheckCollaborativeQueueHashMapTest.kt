@@ -16,11 +16,18 @@ class LincheckCollaborativeQueueHashMapTest {
     fun put(@Param(name = "key") key: Int, value: Int): Int? {
         return map.put(key, value)
     }
-//
-//    @Operation
-//    fun get(key: Int): Int? {
-//        return map[key]
-//    }
+
+    @Operation
+    fun get(key: Int): Int? {
+        return map[key]
+    }
+
+    @Operation
+    fun reduce(): Int =
+        map.reduce(
+            0,
+            { r, el -> el + r },
+        )
 
     @Operation
     fun snapshot(): Set<Pair<Int, Int>> {
@@ -36,7 +43,7 @@ class LincheckCollaborativeQueueHashMapTest {
     @Test
     fun stress() = StressOptions()
         .actorsBefore(20)
-        .actorsPerThread(3)
+        .actorsPerThread(4)
         .actorsAfter(1)
         .iterations(100)
         .minimizeFailedScenario(false)
@@ -59,5 +66,6 @@ class LincheckCollaborativeQueueHashMapTest {
         fun get(key: Int) = h.get(key)
         fun snapshot() = h.entries.map { it.key to it.value }.toSet()
         fun remove(key: Int) = h.remove(key)
+        fun reduce() = h.values.sum()
     }
 }
