@@ -1804,6 +1804,32 @@ public class PureLockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implem
 		}
 	}
 
+	public ArrayList<Entry<K, V>> snapshot() {
+		ArrayList<Entry<K, V>> result = new ArrayList<>();
+		Queue<Node<K, V>> q = new ArrayDeque<>();
+		q.add(rootHolder);
+		while (!q.isEmpty()) {
+			try {
+				var current = q.poll();
+				if (!(current.vOpt == SpecialNull || current.vOpt == null)) {
+					try {
+						result.add(new SimpleImmutableEntry<K, V>(current.key, (V) current.vOpt));
+					} catch (Throwable ignored) {}
+				}
+				var left = current.left;
+				if (left != null) {
+					q.add(left);
+				}
+				var right = current.right;
+				if (right != null) {
+					q.add(right);
+				}
+			} catch (Throwable ignored) {}
+		}
+		return result;
+	}
+
+
 	public V reduce(
 			V start,
 			BiFunction<V, V, V> function

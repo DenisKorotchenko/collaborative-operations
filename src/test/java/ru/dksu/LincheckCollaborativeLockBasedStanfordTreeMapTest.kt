@@ -29,11 +29,11 @@ class LincheckCollaborativeLockBasedStanfordTreeMapTest {
             { r, el -> el + r },
         )
 
-//    @Operation
-//    fun snapshot(): Set<Pair<Int, Int>> {
-//        val res = map.snapshot()
-//        return res.map { it.key to it.value }.toSet()
-//    }
+    @Operation
+    fun snapshot(): Set<Pair<Int, Int>> {
+        val res = map.snapshot()
+        return res.map { it.key to it.value }.toSet()
+    }
 
     @Operation
     fun remove(@Param(name = "key") key: Int): Int? {

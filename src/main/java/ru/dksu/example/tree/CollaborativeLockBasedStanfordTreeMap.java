@@ -1851,10 +1851,84 @@ public class CollaborativeLockBasedStanfordTreeMap<K, V> extends AbstractMap<K, 
 
 
 
+	private class SnapshotToPartialCollaborativeTask implements CollaborativeTask {
+		private final Node<K, V> root;
+		private final ArrayList<Entry<K, V>> partialSnapshot;
+
+		SnapshotToPartialCollaborativeTask(
+				Node<K, V> root,
+				ArrayList<Entry<K, V>> partialSnapshot
+		) {
+			this.root = root;
+			this.partialSnapshot = partialSnapshot;
+		}
+
+		@Override
+		public void start() {
+			Queue<Node<K, V>> q = new ArrayDeque<>();
+			q.add(root);
+			while (!q.isEmpty()) {
+				try {
+					var current = q.poll();
+					if (!(current.vOpt == SpecialNull || current.vOpt == null)) {
+						try {
+							partialSnapshot.add(new SimpleImmutableEntry<K, V>(current.key, (V) current.vOpt));
+						} catch (Throwable ignored) {}
+					}
+					var left = current.left;
+					if (left != null) {
+						q.add(left);
+					}
+					var right = current.right;
+					if (right != null) {
+						q.add(right);
+					}
+				} catch (Throwable ignored) {}
+			}
+		}
+	}
+
 	public ArrayList<Entry<K, V>> snapshot() {
 		while (true) {
 			if (toAllLock.writeLock().tryLock()) {
-				return new ArrayList<>();
+				ArrayList<ArrayList<Entry<K, V>>> partialSnapshots = new ArrayList<>();
+				ArrayList<Entry<K, V>> snapshot = new ArrayList<>();
+				try {
+					Deque<Pair<Integer, Node<K, V>>> q = new ArrayDeque<>();
+					q.push(new Pair(0, rootHolder));
+					int index = 0;
+					for (int i = 0; i < Math.pow(2, MAX_LEVEL); i++) {
+						partialSnapshots.add(new ArrayList<>());
+					}
+					while (!q.isEmpty()) {
+						var p = q.poll();
+						if (p.getSecond() == null) {
+							continue;
+						}
+						if (p.getFirst() >= MAX_LEVEL) {
+							var task = new SnapshotToPartialCollaborativeTask(
+									p.getSecond(),
+									partialSnapshots.get(index++)
+							);
+							collaborativeQueue.add(task);
+							continue;
+						}
+						var val = p.getSecond().vOpt;
+						if (val != null && val != SpecialNull) {
+							snapshot.add(new SimpleImmutableEntry<>(p.getSecond().key, (V) val));
+						}
+						q.push(new Pair<>(p.getFirst() + 1, p.getSecond().left));
+						q.push(new Pair<>(p.getFirst() + 1, p.getSecond().right));
+					}
+					collaborativeQueue.helpIfNeeded();
+					collaborativeQueue.waitForFinish();
+				} finally {
+					toAllLock.writeLock().unlock();
+				}
+				for (var partialSnapshot: partialSnapshots) {
+					snapshot.addAll(partialSnapshot);
+				}
+				return snapshot;
 			} else {
 				collaborativeQueue.helpIfNeeded();
 				Thread.yield();

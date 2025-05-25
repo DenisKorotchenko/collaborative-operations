@@ -1847,7 +1847,34 @@ public class LockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 	public ArrayList<Entry<K, V>> snapshot() {
 		while (true) {
 			if (toAllLock.writeLock().tryLock()) {
-				return new ArrayList<>();
+				try {
+					ArrayList<Entry<K, V>> result = new ArrayList<>();
+					Queue<Node<K, V>> q = new ArrayDeque<>();
+					q.add(rootHolder);
+					while (!q.isEmpty()) {
+						try {
+							var current = q.poll();
+							if (!(current.vOpt == SpecialNull || current.vOpt == null)) {
+								try {
+									result.add(new SimpleImmutableEntry<K, V>(current.key, (V) current.vOpt));
+								} catch (Throwable ignored) {
+								}
+							}
+							var left = current.left;
+							if (left != null) {
+								q.add(left);
+							}
+							var right = current.right;
+							if (right != null) {
+								q.add(right);
+							}
+						} catch (Throwable ignored) {
+						}
+					}
+					return result;
+				} finally {
+					toAllLock.writeLock().unlock();
+				}
 			} else {
 				Thread.yield();
 			}
