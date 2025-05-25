@@ -6,11 +6,11 @@ import org.jetbrains.kotlinx.lincheck.check
 import org.jetbrains.kotlinx.lincheck.paramgen.IntGen
 import org.jetbrains.kotlinx.lincheck.strategy.stress.StressOptions
 import org.junit.jupiter.api.Test
-import ru.dksu.example.hashmap.CollaborativeQueueHashMap
+import ru.dksu.example.tree.CollaborativeLockBasedStanfordTreeMap
 
 @Param(name = "key", gen = IntGen::class, conf = "1:20")
-class LincheckCollaborativeQueueHashMapTest {
-    private val map = CollaborativeQueueHashMap<Int, Int>()
+class LincheckCollaborativeLockBasedStanfordTreeMapTest {
+    private val map = CollaborativeLockBasedStanfordTreeMap<Int, Int>()
 
     @Operation
     fun put(@Param(name = "key") key: Int, value: Int): Int? {
@@ -29,11 +29,11 @@ class LincheckCollaborativeQueueHashMapTest {
             { r, el -> el + r },
         )
 
-    @Operation
-    fun snapshot(): Set<Pair<Int, Int>> {
-        val res = map.snapshot()
-        return res.map { it.key to it.value }.toSet()
-    }
+//    @Operation
+//    fun snapshot(): Set<Pair<Int, Int>> {
+//        val res = map.snapshot()
+//        return res.map { it.key to it.value }.toSet()
+//    }
 
     @Operation
     fun remove(@Param(name = "key") key: Int): Int? {
@@ -43,7 +43,7 @@ class LincheckCollaborativeQueueHashMapTest {
     @Test
     fun stress() = StressOptions()
         .actorsBefore(20)
-        .actorsPerThread(4)
+        .actorsPerThread(10)
         .actorsAfter(1)
         .iterations(100)
         .minimizeFailedScenario(false)

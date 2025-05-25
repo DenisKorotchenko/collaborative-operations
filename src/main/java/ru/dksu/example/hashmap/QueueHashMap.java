@@ -1,6 +1,7 @@
-package ru.dksu;
+package ru.dksu.example.hashmap;
 
 import contention.abstractions.CompositionalMap;
+import ru.dksu.CollaborativeTask;
 
 import java.lang.invoke.MethodHandles;
 import java.util.*;
@@ -289,7 +290,7 @@ public class QueueHashMap<K, V> implements CompositionalMap<K, V> {
     }
 
     // Collaborative tasks for rebuilding
-    private static class RebuildTask<K, V> implements CollaborativeTask  {
+    private static class RebuildTask<K, V> implements CollaborativeTask {
         Buckets<K,V> oldBuckets;
         Buckets<K,V> newBuckets;
         int currentIndex;

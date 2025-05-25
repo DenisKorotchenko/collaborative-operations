@@ -1,0 +1,1 @@
+[CompositionalMap.java](CompositionalMap.java) -- служебный интерфейс, который необходимо реализовать для поддержки тестирования с помощью инструмента synchrobench.  

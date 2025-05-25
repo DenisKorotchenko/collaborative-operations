@@ -1,5 +1,7 @@
 package ru.dksu;
 
+import ru.dksu.example.hashmap.CollaborativeQueueHashMap;
+
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
