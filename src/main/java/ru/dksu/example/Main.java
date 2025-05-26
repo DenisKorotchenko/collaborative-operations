@@ -1,4 +1,4 @@
-package ru.dksu;
+package ru.dksu.example;
 
 import ru.dksu.example.hashmap.CollaborativeQueueHashMap;
 
