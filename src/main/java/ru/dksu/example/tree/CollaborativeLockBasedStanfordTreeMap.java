@@ -47,7 +47,6 @@ import java.util.*;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiFunction;
-import java.util.function.Supplier;
 
 /**
  * A concurrent relaxed balance AVL tree, based on the algorithm of Bronson,
@@ -66,40 +65,10 @@ import java.util.function.Supplier;
  */
 public class CollaborativeLockBasedStanfordTreeMap<K, V> extends AbstractMap<K, V> implements
 		CompositionalMap<K, V> {
-	private final ReadWriteLock toAllLock = new ReentrantReadWriteLock();
+	private final ReadWriteLock collaborativeLock = new ReentrantReadWriteLock();
 	private final CollaborativeQueue<CollaborativeTask> collaborativeQueue = new CollaborativeQueue<>();
 	private final int MAX_LEVEL = 2;
 
-	private <T> T withAllLock(Supplier<T> function) {
-		while (true) {
-			if (toAllLock.readLock().tryLock()) {
-				try {
-					return function.get();
-				} finally {
-					toAllLock.readLock().unlock();
-				}
-			} else {
-				collaborativeQueue.helpIfNeeded();
-				Thread.yield();
-			}
-		}
-	}
-
-	private void withAllLock(Runnable function) {
-		while (true) {
-			if (toAllLock.readLock().tryLock()) {
-				try {
-					function.run();
-					return;
-				} finally {
-					toAllLock.readLock().unlock();
-				}
-			} else {
-				collaborativeQueue.helpIfNeeded();
-				Thread.yield();
-			}
-		}
-	}
 	// public class OptTreeMap<K,V> extends AbstractMap<K,V> implements
 	// ConcurrentMap<K,V> {
 
@@ -334,7 +303,7 @@ public class CollaborativeLockBasedStanfordTreeMap<K, V> extends AbstractMap<K, 
 
 	@Override
 	public void clear() {
-		withAllLock(() -> {
+		collaborativeQueue.lockWithHelpIfNeeded(collaborativeLock.readLock(), () -> {
 			synchronized (rootHolder) {
 				rootHolder.height = 1;
 				rootHolder.right = null;
@@ -684,7 +653,7 @@ public class CollaborativeLockBasedStanfordTreeMap<K, V> extends AbstractMap<K, 
 	@SuppressWarnings("unchecked")
 	private Object update(final Object key, final int func,
 			final Object expected, final Object newValue) {
-		return withAllLock(() -> {
+		return collaborativeQueue.lockWithHelpIfNeeded(collaborativeLock.readLock(), () -> {
 			final Comparable<? super K> k = comparable(key);
 
 			while (true) {
@@ -968,7 +937,7 @@ public class CollaborativeLockBasedStanfordTreeMap<K, V> extends AbstractMap<K, 
 	}
 
 	private Entry<K, V> pollExtremeEntry(final char dir) {
-		return withAllLock(() -> {
+		return collaborativeQueue.lockWithHelpIfNeeded(collaborativeLock.readLock(), () -> {
 			while (true) {
 				final Node<K, V> right = rootHolder.right;
 				if (right == null) {
@@ -1890,7 +1859,7 @@ public class CollaborativeLockBasedStanfordTreeMap<K, V> extends AbstractMap<K, 
 
 	public ArrayList<Entry<K, V>> snapshot() {
 		while (true) {
-			if (toAllLock.writeLock().tryLock()) {
+			if (collaborativeLock.writeLock().tryLock()) {
 				ArrayList<ArrayList<Entry<K, V>>> partialSnapshots = new ArrayList<>();
 				ArrayList<Entry<K, V>> snapshot = new ArrayList<>();
 				try {
@@ -1923,7 +1892,7 @@ public class CollaborativeLockBasedStanfordTreeMap<K, V> extends AbstractMap<K, 
 					collaborativeQueue.helpIfNeeded();
 					collaborativeQueue.waitForFinish();
 				} finally {
-					toAllLock.writeLock().unlock();
+					collaborativeLock.writeLock().unlock();
 				}
 				for (var partialSnapshot: partialSnapshots) {
 					snapshot.addAll(partialSnapshot);
@@ -2007,7 +1976,7 @@ public class CollaborativeLockBasedStanfordTreeMap<K, V> extends AbstractMap<K, 
 			BiFunction<V, V, V> function
 	) {
 		while (true) {
-			if (toAllLock.writeLock().tryLock()) {
+			if (collaborativeLock.writeLock().tryLock()) {
 				V res = start;
 				ArrayList<V> results = new ArrayList<>();
 				try {
@@ -2042,7 +2011,7 @@ public class CollaborativeLockBasedStanfordTreeMap<K, V> extends AbstractMap<K, 
 					collaborativeQueue.helpIfNeeded();
 					collaborativeQueue.waitForFinish();
 				} finally {
-					toAllLock.writeLock().unlock();
+					collaborativeLock.writeLock().unlock();
 				}
 				for (var el: results) {
 					res = function.apply(res, el);

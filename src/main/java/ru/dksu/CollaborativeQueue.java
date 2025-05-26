@@ -1,5 +1,6 @@
 package ru.dksu;
 
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -21,9 +22,19 @@ import java.util.function.Supplier;
  * @author DenisKorotchenko
  */
 public class CollaborativeQueue<TaskT extends CollaborativeTask> {
-    private final ConcurrentLinkedDeque<CollaborativeTask> tasksQueue = new ConcurrentLinkedDeque<>();
+    private ConcurrentLinkedDeque<CollaborativeTask> tasksQueue = new ConcurrentLinkedDeque<>();
+    private ConcurrentLinkedDeque<CollaborativeTask> nextTasksQueue = new ConcurrentLinkedDeque<>();
     private final AtomicInteger inProgress = new AtomicInteger(0);
     private final AtomicBoolean canPoll = new AtomicBoolean(true);
+    private final boolean canEnablePollingWhenNotFinishPrevious;
+
+    public CollaborativeQueue() {
+        this(false);
+    }
+
+    public CollaborativeQueue(boolean canEnablePollingWhenNotFinishPrevious) {
+        this.canEnablePollingWhenNotFinishPrevious = canEnablePollingWhenNotFinishPrevious;
+    }
 
     /**
      * Метод для добавления новых задач в коллаборативную очередь.
@@ -37,7 +48,11 @@ public class CollaborativeQueue<TaskT extends CollaborativeTask> {
      * @param task задача, которую необходимо добавить в очередь.
      */
     public void add(TaskT task) {
-        tasksQueue.addLast(task);
+        if (canPoll.get()) {
+            tasksQueue.addLast(task);
+        } else {
+            nextTasksQueue.addLast(task);
+        }
     }
 
     /**
@@ -47,14 +62,21 @@ public class CollaborativeQueue<TaskT extends CollaborativeTask> {
      * нельзя начать выполнение задач до того, как они все были добавлены.
      */
     public void disablePolling() {
-        canPoll.set(true);
+        canPoll.set(false);
     }
 
     /**
      * Метод, включающий взятие задач из очереди.
      */
     public void enablePolling() {
-        canPoll.set(false);
+        if (!canEnablePollingWhenNotFinishPrevious && !tasksQueue.isEmpty()) {
+            throw new IllegalStateException(
+                    "Queue of previous step wasn't clear when polling was enabled."
+            );
+        }
+        tasksQueue.addAll(nextTasksQueue);
+        nextTasksQueue.clear();
+        canPoll.set(true);
     }
 
     /**
@@ -67,7 +89,7 @@ public class CollaborativeQueue<TaskT extends CollaborativeTask> {
     }
 
     /**
-     * @return закончено ли выполнение всех задач в очереди.
+     * @return закончено ли выполнение всех задач в текущей стадии очереди.
      */
     private boolean isFinished() {
         return inProgress.get() == 0 && tasksQueue.isEmpty();
@@ -75,10 +97,10 @@ public class CollaborativeQueue<TaskT extends CollaborativeTask> {
 
     /**
      * Метод подключения к коллаборативной очереди.
-     *
+     * <p>
      * Может быть вызван как потоком, инициировавшим блокирующую (коллаборативную) операцию,
      * так и другими потоками, которые не могут взять блокировку.
-     *
+     * <p>
      * В случае отсутствия задач для выполнения, поток сразу выйдет из метода,
      * в противном случае начнёт выполнять задачи, пока они есть.
      */
@@ -108,9 +130,9 @@ public class CollaborativeQueue<TaskT extends CollaborativeTask> {
 
     /**
      * Метод, пытающийся взять блокировку, пока взятие не будет успешным.
-     *
+     * <p>
      * В случае успеха выполняет переданную функцию и возвращает её результат, отпуская блокироваку.
-     *
+     * <p>
      * В случае неуспеха пытается присоединиться к коллаборативной помощи.
      *
      * @param lock блокировка, которую необходимо получить, чтобы выполнить функцию
@@ -136,6 +158,16 @@ public class CollaborativeQueue<TaskT extends CollaborativeTask> {
         }
     }
 
+    /**
+     * Метод, пытающийся взять блокировку, пока взятие не будет успешным.
+     * <p>
+     * В случае успеха выполняет переданную функцию и возвращает её результат, отпуская блокироваку.
+     * <p>
+     * В случае неуспеха пытается присоединиться к коллаборативной помощи.
+     *
+     * @param lock блокировка, которую необходимо получить, чтобы выполнить функцию
+     * @param function функция, которую нужно выполнить после взятия блокировки
+     */
     public void lockWithHelpIfNeeded(
             Lock lock,
             Runnable function
@@ -152,12 +184,6 @@ public class CollaborativeQueue<TaskT extends CollaborativeTask> {
                 this.helpIfNeeded();
                 Thread.yield();
             }
-        }
-    }
-
-    public <T> T lockWithHelpIfNeeded() {
-        while (true) {
-
         }
     }
 }

@@ -21,7 +21,7 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
 
     private Buckets<K, V> buckets;
     private final CollaborativeQueue<CollaborativeTask> collaborativeQueue = new CollaborativeQueue<>();
-    private final ReadWriteLock toAllLock = new ReentrantReadWriteLock();
+    private final ReadWriteLock collaborativeLock = new ReentrantReadWriteLock();
 
     // How much buckets put into one collaborative task
     private final int DELTA = 2;
@@ -324,11 +324,11 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
 
     public ArrayList<KeyValue<K, V>> snapshot() {
         while (true) {
-            if (toAllLock.writeLock().tryLock()) {
+            if (collaborativeLock.writeLock().tryLock()) {
                 try {
                     return snapshotUnsafe();
                 } finally {
-                    toAllLock.writeLock().unlock();
+                    collaborativeLock.writeLock().unlock();
                 }
             } else {
                 collaborativeQueue.helpIfNeeded();
@@ -405,18 +405,18 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
             BiFunction<V, V, V> function
     ) {
         while (true) {
-            if (toAllLock.writeLock().tryLock()) {
+            if (collaborativeLock.writeLock().tryLock()) {
                 ArrayList<V> results;
                 try {
-                    results = reduceUnsafe(start, function);
-                    V result = start;
-                    for (V partResult: results) {
-                        result = function.apply(result, partResult);
-                    }
-                    return result;
+                    results = reducePartialUnsafe(start, function);
                 } finally {
-                    toAllLock.writeLock().unlock();
+                    collaborativeLock.writeLock().unlock();
                 }
+                V result = start;
+                for (V partResult: results) {
+                    result = function.apply(result, partResult);
+                }
+                return result;
             } else {
                 collaborativeQueue.helpIfNeeded();
                 Thread.yield();
@@ -425,7 +425,7 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
     }
 
     // Collaborative tasks for reduce operation
-    private static class ReducePartTask<K, V> implements CollaborativeTask {
+    private class ReducePartTask implements CollaborativeTask {
         final ArrayList<V> results;
         final int resultIndex;
         final Buckets<K, V> buckets;
@@ -455,9 +455,6 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
         @Override
         public void start() {
             V res = start;
-            if ((int) start != 0) {
-                throw new RuntimeException("!" + start.toString());
-            }
             for (; currentIndex < endIndex; currentIndex++) {
                 if (buckets.buckets[currentIndex] != null) {
                     for (var el : buckets.buckets[currentIndex]) {
@@ -465,17 +462,11 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
                     }
                 }
             }
-//            if (results.get(resultIndex) != start && res != results.get(resultIndex)) {
-//                throw new RuntimeException(res.toString() + " " + results.get(resultIndex).toString());
-//            }
-            if ((int) results.get(resultIndex) != 0) {
-                throw new RuntimeException(results.get(resultIndex).toString());
-            }
             results.set(resultIndex, res);
         }
     }
 
-    private ArrayList<V> reduceUnsafe(
+    private ArrayList<V> reducePartialUnsafe(
             V start,
             BiFunction<V, V, V> function
     ) {
@@ -487,13 +478,13 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
         int startIndex = 0;
         int endIndex = delta;
         int index = 0;
-        while (endIndex < buckets.buckets.length) {
-            ReducePartTask<K, V> reducePartTask = new ReducePartTask<K, V>(
+        while (startIndex < buckets.buckets.length) {
+            ReducePartTask reducePartTask = new ReducePartTask(
                     results,
                     index++,
                     buckets,
                     startIndex,
-                    endIndex,
+                    Math.min(endIndex, buckets.buckets.length),
                     start,
                     function
             );
@@ -501,17 +492,6 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
             endIndex += delta;
             collaborativeQueue.add(reducePartTask);
         }
-        ReducePartTask<K, V> taskFinal = new ReducePartTask<K, V>(
-                results,
-                index++,
-                buckets,
-                startIndex,
-                buckets.buckets.length,
-                start,
-                function
-        );
-//        taskFinal.start();
-        collaborativeQueue.add(taskFinal);
 
         collaborativeQueue.helpIfNeeded();
         collaborativeQueue.waitForFinish();
@@ -603,22 +583,22 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
     private void rebuildIfNeed() {
         while (true) {
             if (int_size() > 0.75 * buckets.buckets.length) {
-                if (toAllLock.writeLock().tryLock()) {
+                if (collaborativeLock.writeLock().tryLock()) {
                     try {
                         rebuildUnsafe(buckets.buckets.length * 2);
                     } finally {
-                        toAllLock.writeLock().unlock();
+                        collaborativeLock.writeLock().unlock();
                     }
                 } else {
                     collaborativeQueue.helpIfNeeded();
                     Thread.yield();
                 }
             } else if (int_size() < 0.25 * buckets.buckets.length && buckets.buckets.length > 2) {//size < buckets.buckets.length) {
-                if (toAllLock.writeLock().tryLock()) {
+                if (collaborativeLock.writeLock().tryLock()) {
                     try {
                         rebuildUnsafe(buckets.buckets.length / 2);
                     } finally {
-                        toAllLock.writeLock().unlock();
+                        collaborativeLock.writeLock().unlock();
                     }
                 } else {
                     collaborativeQueue.helpIfNeeded();
@@ -756,13 +736,13 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
     public V put(K key, V value, boolean ifAbsent) {
         V result;
         while (true) {
-            if (toAllLock.readLock().tryLock()) {
+            if (collaborativeLock.readLock().tryLock()) {
                 try {
                     result = buckets.put(key, value, ifAbsent);
                     break;
                 } catch (InterruptedException ignored) {
                 } finally {
-                    toAllLock.readLock().unlock();
+                    collaborativeLock.readLock().unlock();
                 }
             } else {
                 collaborativeQueue.helpIfNeeded();
@@ -782,13 +762,13 @@ public class CollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
     public V remove(Object key) {
         V result;
         while (true) {
-            if (toAllLock.readLock().tryLock()) {
+            if (collaborativeLock.readLock().tryLock()) {
                 try {
                     result = buckets.remove((K) key);
                     break;
                 } catch (InterruptedException ignored) {
                 } finally {
-                    toAllLock.readLock().unlock();
+                    collaborativeLock.readLock().unlock();
                 }
             } else {
                 collaborativeQueue.helpIfNeeded();
