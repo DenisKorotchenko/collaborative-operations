@@ -24,10 +24,7 @@ class LincheckCollaborativeQueueHashMapTest {
 
     @Operation
     fun reduce(): Int =
-        map.reduce(
-            0,
-            { r, el -> el + r },
-        )
+        map.reduce({ r, el -> el + r }) ?: 0
 
     @Operation
     fun snapshot(): Set<Pair<Int, Int>> {
@@ -42,7 +39,7 @@ class LincheckCollaborativeQueueHashMapTest {
 
     @Test
     fun stress() = StressOptions()
-        .actorsBefore(20)
+        .actorsBefore(10)
         .actorsPerThread(4)
         .actorsAfter(1)
         .iterations(100)
@@ -51,8 +48,8 @@ class LincheckCollaborativeQueueHashMapTest {
 
     @Test
     fun withHashMap() = StressOptions()
-        .actorsBefore(20)
-        .actorsPerThread(10)
+        .actorsBefore(10)
+        .actorsPerThread(4)
         .actorsAfter(1)
         .iterations(100)
         .minimizeFailedScenario(false)

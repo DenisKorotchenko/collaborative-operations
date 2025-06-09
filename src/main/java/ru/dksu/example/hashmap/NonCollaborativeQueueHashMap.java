@@ -11,6 +11,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 public class NonCollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V> {
     // For benchmarks
@@ -246,13 +247,30 @@ public class NonCollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V
 
     }
 
-    public static class KeyValue<K, V> {
+    public static class KeyValue<K, V> implements Entry<K, V> {
         public K key;
         public V value;
 
         KeyValue(K key, V value) {
             this.key = key;
             this.value = value;
+        }
+
+        @Override
+        public K getKey() {
+            return key;
+        }
+
+        @Override
+        public V getValue() {
+            return value;
+        }
+
+        @Override
+        public V setValue(V value) {
+            V oldValue = this.value;
+            this.value = value;
+            return oldValue;
         }
     }
 
@@ -375,7 +393,7 @@ public class NonCollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V
 
     private void rebuildIfNeed() {
         while (true) {
-            if (int_size() > 0.75 * buckets.buckets.length) {
+            if (internalSize() > 0.75 * buckets.buckets.length) {
                 if (toAllLock.writeLock().tryLock()) {
                     try {
                         rebuildUnsafe(buckets.buckets.length * 2);
@@ -385,7 +403,7 @@ public class NonCollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V
                 } else {
                     Thread.yield();
                 }
-            } else if (int_size() < 0.25 * buckets.buckets.length && buckets.buckets.length > 2) {//size < buckets.buckets.length) {
+            } else if (internalSize() < 0.25 * buckets.buckets.length && buckets.buckets.length > 2) {//size < buckets.buckets.length) {
                 if (toAllLock.writeLock().tryLock()) {
                     try {
                         rebuildUnsafe(buckets.buckets.length / 2);
@@ -446,19 +464,18 @@ public class NonCollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V
 
     @Override
     public Set<K> keySet() {
-        return Set.of();
+        return snapshot().stream().map((kv) -> kv.key).collect(Collectors.toSet());
     }
 
     @Override
     public Collection<V> values() {
-        return List.of();
+        return snapshot().stream().map((kv) -> kv.value).toList();
     }
 
     @Override
     public Set<Entry<K, V>> entrySet() {
-        return Set.of();
+        return Set.copyOf(snapshot());
     }
-
     @Override
     public V getOrDefault(Object key, V defaultValue) {
         return CompositionalMap.super.getOrDefault(key, defaultValue);
@@ -474,15 +491,13 @@ public class NonCollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V
         CompositionalMap.super.replaceAll(function);
     }
 
-    private int int_size() {
+    private int internalSize() {
         return buckets.size.get();
     }
 
     @Override
     public int size() {
-        // TODO: incorrect size operation for benchmarking
-        return this.snapshot().size();
-//        return int_size();
+        return internalSize();
     }
 
     @Override
@@ -545,7 +560,7 @@ public class NonCollaborativeQueueHashMap<K, V> implements CompositionalMap<K, V
 
     @Override
     public void putAll(Map<? extends K, ? extends V> map) {
-        throw new RuntimeException("Not implemented yet");
+        map.forEach(this::put);
     }
 
     @Override
